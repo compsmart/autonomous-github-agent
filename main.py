@@ -59,11 +59,16 @@ def main():
         '--limit', 
         type=int, 
         help='Limit the number of issues to process in a single run'
-    )
+        )
     parser.add_argument(
         '--fast',
         action='store_true',
         help='Use the fast Gemini Flash model instead of the Pro model for faster but potentially less accurate responses'
+    )
+    parser.add_argument(
+        '--review',
+        action='store_true',
+        help='Run in code review mode: analyze open pull requests and provide automated code reviews'
     )
     
     args = parser.parse_args()
@@ -80,7 +85,10 @@ def main():
             logger.info(f"Overriding repository from command line: {owner}/{name}")
           # Create and run agent
         agent = AutonomousBugFixer.from_config_file(args.config, use_fast_model=args.fast)
-        agent.run(limit_issues=args.limit, dry_run=args.dry_run)
+        if args.review:
+            agent.review_pull_requests(limit_prs=args.limit, dry_run=args.dry_run)
+        else:
+            agent.run(limit_issues=args.limit, dry_run=args.dry_run)
             
     except ValueError as ve:
         logger.error(f"Configuration error: {ve}")

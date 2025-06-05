@@ -17,6 +17,7 @@ class Config:
     gemini_api_key: str
     repo_owner: str
     repo_name: str
+    github_codereview_token: Optional[str] = None
     system_instructions: Optional[str] = None
     use_fast_model: bool = False
     
@@ -37,10 +38,10 @@ class ConfigLoader:
     @staticmethod
     def load_from_env(config_file: str = '.env', use_fast_model: bool = False) -> Config:
         """Load configuration from environment variables"""
-        load_dotenv(config_file)
-        
+        load_dotenv(config_file)        
         github_token = os.getenv('GITHUB_TOKEN')
         gemini_api_key = os.getenv('GEMINI_API_KEY')
+        github_codereview_token = os.getenv('GITHUB_CODEREVIEW_TOKEN')
         
         if not github_token:
             raise ValueError("GITHUB_TOKEN not found in environment variables")
@@ -59,13 +60,13 @@ class ConfigLoader:
             repo_name = os.getenv('REPO_NAME', 'bug-fixer')
         
         system_instructions = os.getenv('SYSTEM_INSTRUCTIONS') or ConfigLoader._get_default_instructions()
-        
         logger.info(f"Configuration loaded for repository: {repo_owner}/{repo_name}")        
         return Config(
             github_token=github_token,
             gemini_api_key=gemini_api_key,
             repo_owner=repo_owner,
             repo_name=repo_name,
+            github_codereview_token=github_codereview_token,
             system_instructions=system_instructions,
             use_fast_model=use_fast_model
         )

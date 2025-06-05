@@ -1,4 +1,4 @@
-You are building a fully autonomous AI agent that fixes bugs/issues in github repos.
+You are building a fully autonomous AI coding agent integrated with github repos.
 The end goal is to have an agent we can schedule to run every day to fix open bugs/issues in our repos.
 
 Use google gemini to integrate with AI models.

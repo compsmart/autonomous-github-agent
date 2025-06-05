@@ -15,7 +15,7 @@ class AIClient:
     """Client for interacting with Google Gemini AI"""
     
     def __init__(self, api_key: str, system_instructions: str,
-                 use_fast_model: bool = False):
+        use_fast_model: bool = False):
         self.api_key = api_key
         self.system_instructions = system_instructions
         self.use_fast_model = use_fast_model
@@ -198,3 +198,91 @@ IMPORTANT:
             return response_text.split("```")[1].split("```")[0].strip()
         else:
             return response_text
+        
+    def analyze_code_changes(self, pr_title: str, pr_description: str, changed_files: list) -> dict:
+        """Analyze code changes in a pull request for automated review"""
+        try:
+            # Build the prompt for code review
+            files_content = ""
+            for file_change in changed_files:
+                files_content += f"\n\n--- File: {file_change.filename} ---\n"
+                files_content += f"Status: {file_change.status}\n"
+                files_content += f"Changes: +{file_change.additions} -{file_change.deletions}\n"
+                if hasattr(file_change, 'patch') and file_change.patch:
+                    files_content += f"Patch:\n{file_change.patch}\n"
+                else:
+                    files_content += "No patch data available\n"
+            
+            prompt = f"""
+PULL REQUEST CODE REVIEW
+
+**PR Title:** {pr_title}
+
+**PR Description:**
+{pr_description if pr_description else "No description provided."}
+
+**Changed Files:**
+{files_content}
+
+INSTRUCTIONS:
+1. **Review Quality**: Assess code quality, best practices, and potential issues
+2. **Security Analysis**: Check for security vulnerabilities or concerns
+3. **Performance Impact**: Evaluate potential performance implications
+4. **Logic Review**: Verify the logic makes sense and handles edge cases
+5. **Style & Standards**: Check adherence to coding standards
+6. **Overall Assessment**: Provide an overall recommendation
+
+OUTPUT FORMAT (Strict JSON):
+Return your response as a single JSON object:
+{{
+  "overall_assessment": "APPROVE|REQUEST_CHANGES|COMMENT",
+  "summary": "Brief summary of the review",
+  "strengths": ["List of positive aspects"],
+  "concerns": ["List of issues or concerns"],
+  "suggestions": ["List of improvement suggestions"],
+  "security_issues": ["List of security concerns if any"],
+  "performance_notes": ["Performance-related observations"],
+  "detailed_feedback": "Detailed review feedback for the PR author"
+}}
+
+Be thorough but constructive in your review.
+"""
+            
+            logger.info("Sending code review request to AI")
+            response = self.model.generate_content(prompt)
+            response_text = response.text
+            
+            # Extract JSON from response
+            json_text = self._extract_json_from_response(response_text)
+            
+            try:
+                analysis = json.loads(json_text)
+                logger.info("Successfully parsed AI code review response")
+                return analysis
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse AI response as JSON: {e}")
+                logger.error(f"Raw response: {response_text}")
+                # Return a fallback response
+                return {
+                    "overall_assessment": "COMMENT",
+                    "summary": "Unable to parse detailed review, but changes appear reasonable",
+                    "strengths": [],
+                    "concerns": ["AI review parsing failed"],
+                    "suggestions": ["Manual review recommended"],
+                    "security_issues": [],
+                    "performance_notes": [],
+                    "detailed_feedback": "Automated review encountered parsing issues. Please conduct manual review."
+                }
+                
+        except Exception as e:
+            logger.error(f"Error during AI code analysis: {e}")
+            return {
+                "overall_assessment": "COMMENT",
+                "summary": "Error during automated review",
+                "strengths": [],
+                "concerns": [f"Review error: {str(e)}"],
+                "suggestions": ["Manual review required"],
+                "security_issues": [],
+                "performance_notes": [],
+                "detailed_feedback": f"Automated review failed with error: {str(e)}"
+            }

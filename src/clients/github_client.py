@@ -188,3 +188,195 @@ class GitHubClient:
         except Exception as e:
             logger.error(f"Unexpected error creating pull request: {e}")
             return None
+    
+    def get_open_pull_requests(self) -> List['PullRequest']:
+        """Fetch all open pull requests from the repository"""
+        try:
+            url = f"{self.base_url}/pulls"
+            params = {
+                'state': 'open',
+                'per_page': 100,
+                'sort': 'created',
+                'direction': 'desc'
+            }
+            
+            all_prs = []
+            current_url = url
+            page_num = 1
+            
+            while current_url:
+                logger.info(f"Fetching page {page_num} of open pull requests")
+                response = requests.get(current_url, headers=self.headers, params=params if page_num == 1 else None)
+                response.raise_for_status()
+                
+                page_data = response.json()
+                if not page_data:
+                    break
+                
+                # Filter out draft PRs if desired (configurable)
+                filtered_prs = [pr for pr in page_data if not pr.get('draft', False)]
+                
+                for pr_data in filtered_prs:
+                    pr = self._parse_pull_request(pr_data)
+                    if pr:
+                        all_prs.append(pr)
+                
+                # Check for next page
+                links = response.headers.get('Link', '')
+                current_url = None
+                if 'rel="next"' in links:
+                    for link in links.split(','):
+                        if 'rel="next"' in link:
+                            current_url = link.split(';')[0].strip('<> ')
+                            break
+                page_num += 1
+            
+            logger.info(f"Found {len(all_prs)} open pull requests")
+            return all_prs
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch open pull requests: {e}")
+            return []
+    
+    def get_pull_request_files(self, pr_number: int) -> List['FileChange']:
+        """Get the files changed in a pull request"""
+        try:
+            url = f"{self.base_url}/pulls/{pr_number}/files"
+            response = requests.get(url, headers=self.headers)
+            response.raise_for_status()
+            
+            files_data = response.json()
+            file_changes = []
+            
+            for file_data in files_data:
+                file_change = self._parse_file_change(file_data)
+                if file_change:
+                    file_changes.append(file_change)
+            
+            logger.info(f"Retrieved {len(file_changes)} changed files for PR #{pr_number}")
+            return file_changes
+            
+        except Exception as e:
+            logger.error(f"Failed to get PR files for #{pr_number}: {e}")
+            return []
+    
+    def create_pull_request_review(self, pr_number: int, review_result: 'CodeReviewResult') -> Optional[str]:
+        """Create an automated code review on a pull request"""
+        try:
+            url = f"{self.base_url}/pulls/{pr_number}/reviews"
+              # Prepare review comments - skip line-specific comments for now
+            comments = []
+            # for comment in review_result.comments:
+            #     if comment.line_number:
+            #         comments.append({
+            #             'path': comment.file_path,
+            #             'line': comment.line_number,
+            #             'body': f"**{comment.severity.upper()} - {comment.category.title()}**\n\n{comment.comment}"
+            #         })
+            
+            # Prepare main review body
+            review_body = self._format_review_body(review_result)            # Determine review event
+            if review_result.recommendation == 'approve':
+                event = 'APPROVE'
+            elif review_result.recommendation == 'request_changes':
+                event = 'REQUEST_CHANGES'
+            else:
+                event = 'COMMENT'
+            
+            payload = {
+                'body': review_body,
+                'event': event,
+                'comments': comments            }
+            
+            response = requests.post(url, headers=self.headers, json=payload)
+            
+            if response.status_code not in [200, 201]:
+                logger.error(f"GitHub API error {response.status_code}: {response.text}")
+                logger.error(f"Payload sent: {payload}")
+            
+            response.raise_for_status()
+            
+            review_data = response.json()
+            review_url = review_data.get('html_url')
+            
+            logger.info(f"Created code review for PR #{pr_number}: {review_url}")
+            return review_url
+            
+        except Exception as e:
+            logger.error(f"Failed to create review for PR #{pr_number}: {e}")
+            return None
+    
+    def _parse_pull_request(self, pr_data: dict) -> Optional['PullRequest']:
+        """Parse GitHub PR data into PullRequest object"""
+        try:
+            from datetime import datetime
+            from ..models.review_models import PullRequest
+            
+            return PullRequest(
+                number=pr_data['number'],
+                title=pr_data['title'],
+                body=pr_data.get('body', ''),
+                url=pr_data['html_url'],
+                author=pr_data['user']['login'],
+                branch=pr_data['head']['ref'],
+                base_branch=pr_data['base']['ref'],
+                created_at=datetime.fromisoformat(pr_data['created_at'].replace('Z', '+00:00')),
+                updated_at=datetime.fromisoformat(pr_data['updated_at'].replace('Z', '+00:00')),
+                additions=pr_data.get('additions', 0),
+                deletions=pr_data.get('deletions', 0),
+                changed_files=pr_data.get('changed_files', 0),
+                mergeable=pr_data.get('mergeable', True),
+                draft=pr_data.get('draft', False),
+                labels=[label['name'] for label in pr_data.get('labels', [])],
+                raw_data=pr_data
+            )
+        except Exception as e:
+            logger.error(f"Failed to parse pull request data: {e}")
+            return None
+    
+    def _parse_file_change(self, file_data: dict) -> Optional['FileChange']:
+        """Parse GitHub file change data into FileChange object"""
+        try:
+            from ..models.review_models import FileChange
+            
+            return FileChange(
+                filename=file_data['filename'],
+                status=file_data['status'],
+                additions=file_data['additions'],
+                deletions=file_data['deletions'],
+                changes=file_data['changes'],
+                patch=file_data.get('patch'),
+                previous_filename=file_data.get('previous_filename')
+            )
+        except Exception as e:
+            logger.error(f"Failed to parse file change data: {e}")
+            return None
+    
+    def _format_review_body(self, review_result: 'CodeReviewResult') -> str:
+        """Format the main review body"""
+        body_parts = [
+            "## 🤖 Automated Code Review",
+            f"**Overall Assessment:** {review_result.overall_assessment}",
+            f"**Quality Score:** {review_result.score}/10",
+            "",
+            "### Summary",
+            review_result.summary,
+            "",
+            "### Recommendation",
+            f"**{review_result.recommendation.replace('_', ' ').title()}**"
+        ]
+        
+        if review_result.comments:
+            body_parts.extend([
+                "",
+                f"### Issues Found ({len(review_result.comments)})",
+                "Please see the inline comments for specific issues and suggestions."
+            ])
+        
+        body_parts.extend([
+            "",
+            "---",
+            "*This review was generated automatically by the AI Code Review Agent.*"
+        ])
+        
+        return "\n".join(body_parts)

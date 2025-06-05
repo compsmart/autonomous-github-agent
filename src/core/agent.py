@@ -7,6 +7,7 @@ from typing import Optional
 
 from .config import Config, ConfigLoader
 from .bug_fixer_service import BugFixerService
+from .code_review_service import CodeReviewService
 from ..clients.github_client import GitHubClient
 from ..clients.ai_client import AIClient
 from ..utils.git_operations import GitOperations
@@ -23,19 +24,30 @@ class AutonomousBugFixer:
     
     def __init__(self, config: Config):
         self.config = config
-        
-        # Initialize clients
+          # Initialize clients
         self.github_client = GitHubClient(
             token=config.github_token,
             repo_owner=config.repo_owner,
             repo_name=config.repo_name
-        )        
+        )
+        
+        # Create separate GitHub client for code reviews if token is provided
+        if config.github_codereview_token and config.github_codereview_token != config.github_token:
+            self.github_review_client = GitHubClient(
+                token=config.github_codereview_token,
+                repo_owner=config.repo_owner,
+                repo_name=config.repo_name
+            )
+            logger.info("Using separate GitHub token for code reviews")
+        else:
+            self.github_review_client = self.github_client
+            logger.info("Using main GitHub token for code reviews")
+            
         self.ai_client = AIClient(
             api_key=config.gemini_api_key,
             system_instructions=config.system_instructions or "",
             use_fast_model=config.use_fast_model
         )
-        
         self.git_ops = GitOperations(
             repo_url=config.repo_url,
             github_token=config.github_token
@@ -46,6 +58,14 @@ class AutonomousBugFixer:
             ai_client=self.ai_client,
             git_ops=self.git_ops
         )
+        
+        self.code_review_service = CodeReviewService(
+            github_client=self.github_client,
+            ai_client=self.ai_client
+        )
+        
+        # Store the review client separately for the service to use
+        self.code_review_service.review_client = self.github_review_client
         
         logger.info(f"Autonomous Bug Fixer initialized for {config.repo_full_name}")    
     @classmethod
@@ -118,3 +138,57 @@ class AutonomousBugFixer:
             print("No open issues found that meet the criteria for processing.")
         
         print("--- END OF DRY RUN ---")
+
+    def review_pull_requests(self, limit_prs: Optional[int] = None, dry_run: bool = False):
+        """Review open pull requests autonomously"""
+        logger.info("Starting Code Review Mode")
+        try:
+            pull_requests = self.github_client.get_open_pull_requests()
+            if not pull_requests:
+                logger.info("No open pull requests found for review")
+                return
+            if dry_run:
+                self._print_dry_run_pr_results(pull_requests, limit_prs)
+                return
+            if limit_prs and limit_prs > 0:
+                if len(pull_requests) > limit_prs:
+                    logger.info(f"Limiting to first {limit_prs} pull requests")
+                    pull_requests = pull_requests[:limit_prs]
+            logger.info(f"Found {len(pull_requests)} pull requests to review")
+            results = self.code_review_service.review_pull_requests(limit_prs)
+            self._print_review_summary(results, self.config.repo_full_name)
+        except Exception as e:
+            logger.error(f"Fatal error in code review: {e}")
+        finally:
+            logger.info("Code review finished")
+
+    def _print_dry_run_pr_results(self, pull_requests, limit_prs):
+        print("\n--- DRY RUN MODE (Code Review) ---")
+        print(f"Repository: {self.config.repo_full_name}")
+        if pull_requests:
+            display_count = min(len(pull_requests), limit_prs) if limit_prs else len(pull_requests)
+            print(f"\nFound {len(pull_requests)} open pull requests that would be reviewed:")
+            print(f"Showing first {display_count} pull requests:")
+            for i, pr in enumerate(pull_requests[:display_count]):
+                print(f"  {i+1}. PR #{pr.number}: {pr.title}")
+                print(f"     URL: {pr.url}")
+            if limit_prs and len(pull_requests) > limit_prs:
+                print(f"  ...and {len(pull_requests) - limit_prs} more pull requests")
+        else:
+            print("No open pull requests found that meet the criteria for review.")
+        print("--- END OF DRY RUN ---")
+
+    def _print_review_summary(self, results, repo_full_name):
+        print("\n--- CODE REVIEW SUMMARY ---")
+        print(f"Repository: {repo_full_name}")
+        if not results:
+            print("No pull requests were reviewed.")
+            return
+        for result in results:
+            status = "SUCCESS" if result.success else "FAILED"
+            print(f"PR #{result.pr_number}: {status}")
+            if result.review_url:
+                print(f"  Review URL: {result.review_url}")
+            if result.error_message:
+                print(f"  Error: {result.error_message}")
+        print("--- END OF SUMMARY ---")
