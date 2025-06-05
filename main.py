@@ -21,16 +21,41 @@ from pathlib import Path
 src_path = Path(__file__).parent / 'src'
 sys.path.insert(0, str(src_path))
 
-from src.core.agent import AutonomousBugFixer
+from src.core.enhanced_agent import EnhancedAutonomousBugFixer
 from src.core.config import ConfigLoader
 
-# Configure logging
+class EmojiFilter(logging.Filter):
+    """Filter to replace emoji characters with text for console output"""
+    def filter(self, record):
+        if hasattr(record, 'msg') and isinstance(record.msg, str):
+            # Replace common emoji with text equivalents
+            emoji_replacements = {
+                '🚀': '[START]',
+                '📋': '[FETCH]', 
+                '✅': '[OK]',
+                '🔍': '[ANALYZE]',
+                '🛠️': '[FIX]',
+                '📊': '[SUMMARY]',
+                '🧹': '[CLEANUP]',
+                '❌': '[ERROR]',
+                '⚠️': '[WARNING]'
+            }
+            msg = record.msg
+            for emoji, text in emoji_replacements.items():
+                msg = msg.replace(emoji, text)
+            record.msg = msg
+        return True
+
+# Configure logging with proper encoding support
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.addFilter(EmojiFilter())
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('bug_fixer.log'),
-        logging.StreamHandler(sys.stdout)
+        logging.FileHandler('bug_fixer.log', encoding='utf-8'),
+        console_handler
     ]
 )
 logger = logging.getLogger(__name__)
@@ -83,12 +108,13 @@ def main():
             os.environ['REPO_OWNER'] = owner
             os.environ['REPO_NAME'] = name
             logger.info(f"Overriding repository from command line: {owner}/{name}")
-          # Create and run agent
-        agent = AutonomousBugFixer.from_config_file(args.config, use_fast_model=args.fast)
+            
+        # Create and run agent
+        agent = EnhancedAutonomousBugFixer.from_config_file(args.config, use_fast_model=args.fast)
         if args.review:
-            agent.review_pull_requests(limit_prs=args.limit, dry_run=args.dry_run)
+            agent.run_code_reviews(pr_limit=args.limit)
         else:
-            agent.run(limit_issues=args.limit, dry_run=args.dry_run)
+            agent.run(issue_limit=args.limit, dry_run=args.dry_run)
             
     except ValueError as ve:
         logger.error(f"Configuration error: {ve}")

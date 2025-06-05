@@ -24,8 +24,12 @@ class GitHubClient:
         }
         self.base_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}"
     
-    def get_open_issues(self) -> List[BugIssue]:
-        """Fetch all open issues from GitHub repository that do not have an associated open pull request."""
+    def get_open_issues(self, limit: Optional[int] = None) -> List[BugIssue]:
+        """Fetch open issues from GitHub repository that do not have an associated open pull request.
+        
+        Args:
+            limit: Maximum number of suitable issues to return. If None, returns all.
+        """
         try:
             url = f"{self.base_url}/issues"
             params = {
@@ -38,6 +42,7 @@ class GitHubClient:
             all_issues_data = []
             current_url = url
             page_num = 1
+            found_suitable_count = 0
             
             # Handle pagination for issues list
             while current_url:
@@ -49,6 +54,11 @@ class GitHubClient:
                 if not page_data:
                     break
                 all_issues_data.extend(page_data)
+                
+                # Early termination if we have enough data to potentially find our limit
+                # We fetch more than the limit because some issues might be filtered out
+                if limit and len(all_issues_data) >= limit * 3:
+                    break
                 
                 if 'next' in response.links:
                     current_url = response.links['next']['url']
@@ -63,8 +73,7 @@ class GitHubClient:
                     candidate_issues_data.append(issue_data)
             
             logger.info(f"Found {len(candidate_issues_data)} raw open issues. Now filtering by linked open PRs.")
-            
-            # Filter out issues with linked open PRs
+              # Filter out issues with linked open PRs and apply limit
             final_issues = []
             for issue_data in candidate_issues_data:
                 issue_number = issue_data['number']
@@ -88,6 +97,11 @@ class GitHubClient:
                     )
                     final_issues.append(issue)
                     logger.info(f"Issue #{issue_number} ({issue.title}) is suitable for fixing.")
+                    
+                    # Check limit AFTER we've found a suitable issue
+                    if limit and len(final_issues) >= limit:
+                        logger.info(f"Reached issue limit of {limit}. Stopping search.")
+                        break
             
             logger.info(f"Found {len(final_issues)} open issues suitable for fixing.")
             return final_issues
@@ -238,6 +252,70 @@ class GitHubClient:
             logger.error(f"Failed to fetch open pull requests: {e}")
             return []
     
+    def get_pull_request_reviews(self, pr_number: int) -> List[dict]:
+        """Get existing reviews for a pull request
+        
+        Args:
+            pr_number: The pull request number
+            
+        Returns:
+            List of review dictionaries from GitHub API
+        """
+        try:
+            url = f"{self.base_url}/pulls/{pr_number}/reviews"
+            response = requests.get(url, headers=self.headers)
+            response.raise_for_status()
+            
+            reviews = response.json()
+            logger.debug(f"Found {len(reviews)} existing reviews for PR #{pr_number}")
+            return reviews
+            
+        except Exception as e:
+            logger.error(f"Failed to get reviews for PR #{pr_number}: {e}")
+            return []
+    
+    def has_automated_reviews(self, pr_number: int) -> bool:
+        """Check if a PR already has automated reviews (to avoid duplicate reviews)
+        
+        Args:
+            pr_number: The pull request number
+            
+        Returns:
+            True if the PR already has reviews, False otherwise
+        """
+        reviews = self.get_pull_request_reviews(pr_number)
+        
+        # Check if there are any reviews at all
+        if not reviews:
+            return False
+              # For now, consider any review as a reason to skip
+        # You could enhance this to only check for bot reviews or specific review types
+        return len(reviews) > 0
+
+    def get_recent_pull_requests(self, limit: Optional[int] = None) -> List['PullRequest']:
+        """Fetch recent pull requests from the repository that don't have existing reviews
+        
+        Args:
+            limit: Maximum number of PRs to return. If None, returns all.
+        """
+        # Get all open pull requests
+        all_prs = self.get_open_pull_requests()
+        
+        # Filter out PRs that already have reviews to avoid duplicating work
+        unreviewed_prs = []
+        for pr in all_prs:
+            if not self.has_automated_reviews(pr.number):
+                unreviewed_prs.append(pr)
+                logger.debug(f"PR #{pr.number} has no existing reviews - adding to review queue")
+            else:
+                logger.info(f"Skipping PR #{pr.number} - already has existing reviews")
+        
+        logger.info(f"Filtered {len(all_prs)} open PRs down to {len(unreviewed_prs)} unreviewed PRs")
+        
+        if limit:
+            return unreviewed_prs[:limit]
+        return unreviewed_prs
+    
     def get_pull_request_files(self, pr_number: int) -> List['FileChange']:
         """Get the files changed in a pull request"""
         try:
@@ -361,17 +439,26 @@ class GitHubClient:
             "",
             "### Summary",
             review_result.summary,
-            "",
-            "### Recommendation",
+            "",            "### Recommendation",
             f"**{review_result.recommendation.replace('_', ' ').title()}**"
         ]
         
         if review_result.comments:
-            body_parts.extend([
-                "",
-                f"### Issues Found ({len(review_result.comments)})",
-                "Please see the inline comments for specific issues and suggestions."
-            ])
+            # Count only actual issues (errors and warnings), not positive aspects or suggestions
+            issue_comments = [c for c in review_result.comments if c.severity in ['error', 'warning']]
+            
+            if issue_comments:
+                body_parts.extend([
+                    "",
+                    f"### Issues Found ({len(issue_comments)})",
+                    "Please see the inline comments for specific issues and suggestions."
+                ])
+            else:
+                body_parts.extend([
+                    "",
+                    "### No Issues Found",
+                    "This PR looks good! See below for positive feedback and suggestions."
+                ])
         
         body_parts.extend([
             "",

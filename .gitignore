@@ -235,3 +235,6 @@ bug_fixer_*/
 .Trashes
 Thumbs.db
 ehthumbs.db
+
+testApp/*
+testApp/

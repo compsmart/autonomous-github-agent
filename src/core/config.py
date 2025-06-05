@@ -72,6 +72,11 @@ class ConfigLoader:
         )
     
     @staticmethod
+    def load_from_env_file(config_file: str = '.env', use_fast_model: bool = False) -> Config:
+        """Load configuration from environment file"""
+        return ConfigLoader.load_from_env(config_file, use_fast_model)
+    
+    @staticmethod
     def _get_default_instructions() -> str:
         """Get default system instructions for the AI agent"""
         return """

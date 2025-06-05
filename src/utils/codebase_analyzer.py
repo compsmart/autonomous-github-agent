@@ -220,3 +220,115 @@ class CodebaseAnalyzer:
                         dependencies[lang] = "Error reading build.gradle.kts"
 
         return dependencies
+
+    def read_specific_files(self, file_paths: List[str]) -> Dict[str, str]:
+        """Read specific files mentioned in bug reports"""
+        file_contents = {}
+        
+        for file_path in file_paths:
+            try:
+                # Normalize path and ensure it's safe
+                safe_path = self._sanitize_file_path(file_path)
+                if not safe_path:
+                    continue
+                    
+                full_path = Path(self.repo_path) / safe_path
+                
+                # Check if file exists and is within repo
+                if not full_path.exists() or not self._is_safe_path(full_path):
+                    logger.warning(f"File not found or unsafe: {file_path}")
+                    file_contents[file_path] = f"File not found: {file_path}"
+                    continue
+                
+                # Read file content with size limit for safety
+                with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read(50000)  # Limit to 50KB to avoid memory issues
+                    
+                if len(content) >= 50000:
+                    content += "\n... (content truncated due to size)"
+                    
+                file_contents[file_path] = content
+                logger.info(f"Successfully read file: {file_path} ({len(content)} chars)")
+                
+            except Exception as e:
+                logger.error(f"Failed to read file {file_path}: {e}")
+                file_contents[file_path] = f"Error reading file: {str(e)}"
+        
+        return file_contents
+    
+    def extract_file_references_from_issue(self, issue_body: str) -> List[str]:
+        """Extract file references from issue description"""
+        import re
+        
+        file_patterns = [
+            # Direct file mentions: file.js, path/to/file.py
+            r'\b([a-zA-Z0-9_\-/\.]+\.[a-zA-Z]{1,10})\b',
+            # Code blocks with file names
+            r'```[a-zA-Z]*\s*([a-zA-Z0-9_\-/\.]+\.[a-zA-Z]{1,10})',
+            # Explicit file references: "in file.js", "file: app.py"
+            r'(?:in|file:?)\s+([a-zA-Z0-9_\-/\.]+\.[a-zA-Z]{1,10})',
+        ]
+        
+        referenced_files = set()
+        
+        for pattern in file_patterns:
+            matches = re.findall(pattern, issue_body, re.IGNORECASE)
+            for match in matches:
+                if isinstance(match, tuple):
+                    file_path = match[0] if match[0] else match[1]
+                else:
+                    file_path = match
+                    
+                # Filter out common false positives
+                if self._is_likely_file_path(file_path):
+                    referenced_files.add(file_path)
+        
+        return list(referenced_files)
+    
+    def _sanitize_file_path(self, file_path: str) -> str:
+        """Sanitize file path to prevent directory traversal"""
+        if not file_path:
+            return ""
+            
+        # Remove dangerous patterns
+        file_path = file_path.replace('..', '').replace('~', '')
+        file_path = file_path.lstrip('/')
+        
+        # Ensure it's a reasonable file path
+        if len(file_path) > 200 or not file_path:
+            return ""
+            
+        return file_path
+    
+    def _is_safe_path(self, full_path: Path) -> bool:
+        """Check if path is safe (within repository)"""
+        try:
+            repo_path = Path(self.repo_path).resolve()
+            full_path_resolved = full_path.resolve()
+            return str(full_path_resolved).startswith(str(repo_path))
+        except Exception:
+            return False
+    
+    def _is_likely_file_path(self, path: str) -> bool:
+        """Check if string is likely a real file path"""
+        if not path or len(path) > 200:
+            return False
+            
+        # Common file extensions
+        valid_extensions = {
+            'js', 'py', 'java', 'cpp', 'c', 'h', 'cs', 'php', 'rb', 'go',
+            'ts', 'jsx', 'tsx', 'vue', 'html', 'css', 'scss', 'sass',
+            'json', 'xml', 'yaml', 'yml', 'md', 'txt', 'cfg', 'ini',
+            'sql', 'sh', 'bat', 'ps1', 'dockerfile', 'gradle', 'maven'
+        }
+        
+        # Check if it has a valid extension
+        extension = path.split('.')[-1].lower()
+        if extension not in valid_extensions:
+            return False
+            
+        # Filter out URLs and other non-file patterns
+        if any(pattern in path.lower() for pattern in ['http://', 'https://', '@', '://']):
+            return False
+            
+        return True

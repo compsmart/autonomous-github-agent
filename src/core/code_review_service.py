@@ -69,11 +69,12 @@ class CodeReviewService:
                     comments=[],
                     score=5,
                     success=False,
-                    error_message="No file changes found in pull request"
-                )
+                    error_message="No file changes found in pull request"                )
             
-            logger.info(f"Found {len(file_changes)} changed files in PR #{pr.number}")            # Perform AI analysis of the changes
-            review_analysis = self.ai_client.analyze_code_changes(pr.title, pr.body, file_changes)
+            logger.info(f"Found {len(file_changes)} changed files in PR #{pr.number}")
+            
+            # Perform AI analysis of the changes
+            review_analysis = self.ai_client.analyze_code_changes(pr.title, pr.body, file_changes, pr.number)
             
             if not review_analysis:
                 return CodeReviewResult(
@@ -84,10 +85,11 @@ class CodeReviewService:
                     comments=[],
                     score=0,
                     success=False,
-                    error_message="AI analysis failed"
-                )
+                    error_message="AI analysis failed"                )
               # Convert AI analysis to review result
-            review_result = self._create_review_result_from_dict(pr, review_analysis)            # Submit the review to GitHub
+            review_result = self._create_review_result(pr, review_analysis)
+            
+            # Submit the review to GitHub
             client_for_review = self.review_client if self.review_client else self.github_client
             client_name = "review client" if self.review_client else "main client"
             logger.info(f"Posting review for PR #{pr.number} using {client_name}")
@@ -113,6 +115,25 @@ class CodeReviewService:
                 error_message=str(e)
             )
     
+    def review_pull_request(self, pr: PullRequest) -> dict:
+        """Review a single pull request (alias for review_single_pull_request)
+        
+        Args:
+            pr: PullRequest object to review
+            
+        Returns:
+            Dictionary with review result for compatibility with enhanced agent
+        """
+        result = self.review_single_pull_request(pr)
+        
+        # Convert CodeReviewResult to dictionary format expected by enhanced agent
+        return {
+            'pr_number': pr.number,
+            'status': 'success' if result.success else 'error',
+            'result': result,
+            'error': result.error_message if not result.success else None
+        }
+    
     def _create_review_result(self, pr: PullRequest, analysis: ReviewAnalysis) -> CodeReviewResult:
         """Convert AI analysis to a structured review result"""
         from ..models.review_models import ReviewComment
@@ -130,8 +151,7 @@ class CodeReviewService:
                 category="security"
             ))
             issues_count += 1
-        
-        # Add performance issues
+          # Add performance issues
         for issue in analysis.performance_issues:
             comments.append(ReviewComment(
                 file_path="",
@@ -140,6 +160,7 @@ class CodeReviewService:
                 severity="warning",
                 category="performance"
             ))
+            issues_count += 1
         
         # Add code style issues
         for issue in analysis.code_style_issues:
@@ -161,8 +182,7 @@ class CodeReviewService:
                 category="logic"
             ))
             issues_count += 1
-        
-        # Add maintainability issues
+          # Add maintainability issues
         for issue in analysis.maintainability_issues:
             comments.append(ReviewComment(
                 file_path="",
@@ -171,6 +191,7 @@ class CodeReviewService:
                 severity="warning",
                 category="maintainability"
             ))
+            issues_count += 1
         
         # Add positive aspects
         for positive in analysis.positive_aspects:

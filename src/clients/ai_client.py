@@ -7,6 +7,7 @@ from typing import Optional
 import google.generativeai as genai
 
 from ..models.bug_models import BugIssue, CodebaseInfo, FixAnalysis
+from ..utils.ai_logger import ai_logger
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ class AIClient:
         self.api_key = api_key
         self.system_instructions = system_instructions
         self.use_fast_model = use_fast_model
+        self.current_model_name = None  # Track current model for logging
         self._initialize_model()
 
     def _initialize_model(self):
@@ -32,14 +34,14 @@ class AIClient:
                 model_name = 'gemini-2.5-flash-preview-05-20'
                 logger.info("Using fast model: gemini-2.5-flash-preview-05-20")
             else:
-                # Use pro model (preferred as per user instructions)
-                model_name = 'gemini-2.5-pro-preview-05-06'
+                # Use pro model (preferred as per user instructions)                model_name = 'gemini-2.5-pro-preview-05-06'
                 logger.info("Using pro model: gemini-2.5-pro-preview-05-06")
             
             self.model = genai.GenerativeModel(
                 model_name,
                 system_instruction=self.system_instructions
             )
+            self.current_model_name = model_name
             logger.info(f"AI model initialized successfully with {model_name}")
             
         except Exception as e:
@@ -59,6 +61,7 @@ class AIClient:
                     fallback_model,
                     system_instruction=self.system_instructions
                 )
+                self.current_model_name = fallback_model
                 logger.info(f"Fallback to {fallback_model} model successful")
                 
             except Exception as fallback_error:
@@ -69,6 +72,7 @@ class AIClient:
                         'gemini-1.5-pro',
                         system_instruction=self.system_instructions
                     )
+                    self.current_model_name = 'gemini-1.5-pro'
                     logger.info("Final fallback to gemini-1.5-pro model successful")
                 except Exception as final_error:
                     logger.error(f"All model initialization attempts failed: {final_error}")
@@ -78,6 +82,11 @@ class AIClient:
         """Use AI to analyze the bug and generate a fix"""
         try:
             context = self._build_analysis_context(issue, codebase_info, repo_owner, repo_name)
+            
+            # Log the request to AI logger
+            model_name = self.current_model_name or "unknown"
+            ai_logger.log_bug_analysis_request(issue.number, issue.title, model_name)
+            ai_logger.log_prompt_context("BUG_ANALYSIS", f"#{issue.number}", context)
             
             logger.info(f"Sending analysis request to AI for issue #{issue.number}")
             
@@ -99,6 +108,10 @@ class AIClient:
             
             try:
                 parsed_response = json.loads(json_text)
+                
+                # Log AI response to dedicated logger
+                ai_logger.log_bug_analysis_response(issue.number, response_text, parsed_response)
+                
                 fix_analysis = FixAnalysis(
                     analysis=parsed_response.get('analysis', ''),
                     root_cause=parsed_response.get('root_cause', ''),
@@ -112,11 +125,14 @@ class AIClient:
                     return fix_analysis
                 else:
                     logger.error(f"AI response for issue #{issue.number} failed validation")
+                    ai_logger.log_ai_error("BUG_ANALYSIS", f"#{issue.number}", "Response failed validation")
                     return None
                     
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse AI response as JSON for issue #{issue.number}: {e}")
                 logger.debug(f"Problematic JSON text: {json_text}")
+                ai_logger.log_ai_error("BUG_ANALYSIS", f"#{issue.number}", f"JSON parsing failed: {e}")
+                ai_logger.log_bug_analysis_response(issue.number, response_text)
                 return None
                 
         except Exception as e:
@@ -199,7 +215,7 @@ IMPORTANT:
         else:
             return response_text
         
-    def analyze_code_changes(self, pr_title: str, pr_description: str, changed_files: list) -> dict:
+    def analyze_code_changes(self, pr_title: str, pr_description: str, changed_files: list, pr_number: int = None) -> dict:
         """Analyze code changes in a pull request for automated review"""
         try:
             # Build the prompt for code review
@@ -212,7 +228,7 @@ IMPORTANT:
                     files_content += f"Patch:\n{file_change.patch}\n"
                 else:
                     files_content += "No patch data available\n"
-            
+
             prompt = f"""
 PULL REQUEST CODE REVIEW
 
@@ -248,6 +264,12 @@ Return your response as a single JSON object:
 Be thorough but constructive in your review.
 """
             
+            # Log the request to AI logger
+            pr_id = pr_number if pr_number else "unknown"
+            model_name = self.current_model_name or "unknown"
+            ai_logger.log_code_review_request(pr_id, pr_title, model_name)
+            ai_logger.log_prompt_context("CODE_REVIEW", f"PR#{pr_id}", prompt)
+            
             logger.info("Sending code review request to AI")
             response = self.model.generate_content(prompt)
             response_text = response.text
@@ -257,11 +279,20 @@ Be thorough but constructive in your review.
             
             try:
                 analysis = json.loads(json_text)
+                
+                # Log AI response to dedicated logger
+                ai_logger.log_code_review_response(pr_id, response_text, analysis)
+                
                 logger.info("Successfully parsed AI code review response")
                 return analysis
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse AI response as JSON: {e}")
                 logger.error(f"Raw response: {response_text}")
+                
+                # Log the error and raw response
+                ai_logger.log_ai_error("CODE_REVIEW", f"PR#{pr_id}", f"JSON parsing failed: {e}")
+                ai_logger.log_code_review_response(pr_id, response_text)
+                
                 # Return a fallback response
                 return {
                     "overall_assessment": "COMMENT",
@@ -276,6 +307,9 @@ Be thorough but constructive in your review.
                 
         except Exception as e:
             logger.error(f"Error during AI code analysis: {e}")
+            pr_id = pr_number if pr_number else "unknown"
+            ai_logger.log_ai_error("CODE_REVIEW", f"PR#{pr_id}", str(e))
+            
             return {
                 "overall_assessment": "COMMENT",
                 "summary": "Error during automated review",
