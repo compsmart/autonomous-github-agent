@@ -218,6 +218,9 @@ IMPORTANT:
 - Preserve all formatting and style
 - Test logic should remain unchanged unless it's the bug
 - old_content must match exactly what's in the file
+- If old_content might appear multiple times, include 3-5 lines of context before and after to make it unique
+- For CSS/HTML: include the full rule or element to avoid ambiguity
+- For code: include the full function signature or class definition when targeting methods
 """ 
     def _extract_json_from_response(self, response_text: str) -> str:
         """Extract JSON from AI response, handling markdown code blocks"""

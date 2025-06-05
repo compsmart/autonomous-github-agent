@@ -134,25 +134,100 @@ class EnhancedGitOperations:
             return False
 
     def _apply_replace_fix(self, content: str, fix: TargetedFix) -> Optional[str]:
-        """Apply a replacement fix"""
+        """Apply a replacement fix with smart context matching"""
         if not fix.old_content:
             logger.error("Replace fix missing old_content")
             return None
         
-        # Count occurrences to ensure uniqueness
+        # Count occurrences to check for exact match
         occurrences = content.count(fix.old_content)
         if occurrences == 0:
             logger.error(f"old_content not found in file: {fix.file_path}")
             logger.debug(f"Looking for: {repr(fix.old_content)}")
             return None
-        elif occurrences > 1:
-            logger.error(f"old_content appears {occurrences} times, ambiguous replacement")
+        elif occurrences == 1:
+            # Exact match - safe to replace
+            new_content = content.replace(fix.old_content, fix.new_content)
+            logger.info(f"Replaced content in {fix.file_path}: {len(fix.old_content)} chars -> {len(fix.new_content)} chars")
+            return new_content
+        else:
+            # Multiple occurrences - try smart context matching
+            logger.warning(f"old_content appears {occurrences} times, attempting smart context matching")
+            return self._apply_smart_context_replacement(content, fix)
+
+    def _apply_smart_context_replacement(self, content: str, fix: TargetedFix) -> Optional[str]:
+        """Apply replacement using smart context matching for ambiguous cases"""
+        lines = content.splitlines()
+        old_lines = fix.old_content.splitlines()
+        
+        if not old_lines:
+            logger.error("Empty old_content for smart replacement")
             return None
         
-        # Perform the replacement
-        new_content = content.replace(fix.old_content, fix.new_content)
-        logger.info(f"Replaced content in {fix.file_path}: {len(fix.old_content)} chars -> {len(fix.new_content)} chars")
-        return new_content
+        # Find all potential matches
+        matches = []
+        for i in range(len(lines) - len(old_lines) + 1):
+            # Check if this position matches the old content
+            candidate_lines = lines[i:i + len(old_lines)]
+            if [line.rstrip() for line in candidate_lines] == [line.rstrip() for line in old_lines]:
+                # Calculate a confidence score based on surrounding context
+                score = self._calculate_context_score(lines, i, len(old_lines))
+                matches.append((i, score))
+        
+        if not matches:
+            logger.error("No valid matches found in smart context replacement")
+            return None
+        elif len(matches) == 1:
+            # Only one match found
+            start_line, _ = matches[0]
+            logger.info(f"Smart replacement: found unique match at line {start_line + 1}")
+        else:
+            # Multiple matches - pick the one with highest context score
+            matches.sort(key=lambda x: x[1], reverse=True)
+            start_line, best_score = matches[0]
+            logger.info(f"Smart replacement: selected best match at line {start_line + 1} (score: {best_score:.2f})")
+            
+            # If the best score is tied with others, log a warning
+            tied_matches = [m for m in matches if abs(m[1] - best_score) < 0.01]
+            if len(tied_matches) > 1:
+                logger.warning(f"Multiple matches with similar scores - proceeding with line {start_line + 1}")
+        
+        # Apply the replacement
+        new_lines = fix.new_content.splitlines()
+        result_lines = lines[:start_line] + new_lines + lines[start_line + len(old_lines):]
+        
+        logger.info(f"Smart replacement applied in {fix.file_path}: lines {start_line + 1}-{start_line + len(old_lines)} replaced")
+        return '\n'.join(result_lines) + ('\n' if content.endswith('\n') else '')
+
+    def _calculate_context_score(self, lines: List[str], start_line: int, match_length: int) -> float:
+        """Calculate a confidence score for a potential match based on surrounding context"""
+        score = 0.0
+        context_range = 3  # Look at 3 lines before and after
+        
+        # Check lines before the match
+        for i in range(max(0, start_line - context_range), start_line):
+            if lines[i].strip():  # Non-empty line
+                score += 0.1
+        
+        # Check lines after the match
+        end_line = start_line + match_length
+        for i in range(end_line, min(len(lines), end_line + context_range)):
+            if lines[i].strip():  # Non-empty line
+                score += 0.1
+        
+        # Bonus for being near the middle of the file (often more stable)
+        file_middle = len(lines) / 2
+        distance_from_middle = abs(start_line - file_middle)
+        middle_bonus = max(0, 1.0 - (distance_from_middle / file_middle))
+        score += middle_bonus * 0.5
+        
+        # Bonus for having unique surrounding content
+        before_context = ' '.join(lines[max(0, start_line - 2):start_line])
+        after_context = ' '.join(lines[end_line:min(len(lines), end_line + 2)])
+        if before_context or after_context:
+            score += 0.2
+        
+        return score
 
     def _apply_insert_fix(self, content: str, fix: TargetedFix) -> Optional[str]:
         """Apply an insertion fix"""
